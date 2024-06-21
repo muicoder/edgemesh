@@ -1,0 +1,271 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+  namespace: kube-system
+---
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  annotations:
+    apparmor.security.beta.kubernetes.io/allowedProfileNames: runtime/default
+    apparmor.security.beta.kubernetes.io/defaultProfileName: runtime/default
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: docker/default
+    seccomp.security.alpha.kubernetes.io/defaultProfileName: docker/default
+  labels:
+    k8s-app: flannel
+  name: psp.flannel.unprivileged
+spec:
+  allowPrivilegeEscalation: false
+  allowedCapabilities:
+  - NET_ADMIN
+  - NET_RAW
+  allowedHostPaths:
+  - pathPrefix: /etc/cni/net.d
+  - pathPrefix: /etc/kube-flannel
+  - pathPrefix: /run/flannel
+  defaultAddCapabilities: []
+  defaultAllowPrivilegeEscalation: false
+  fsGroup:
+    rule: RunAsAny
+  hostIPC: false
+  hostNetwork: true
+  hostPID: false
+  hostPorts:
+  - max: 65535
+    min: 0
+  privileged: false
+  readOnlyRootFilesystem: false
+  requiredDropCapabilities: []
+  runAsUser:
+    rule: RunAsAny
+  seLinux:
+    rule: RunAsAny
+  supplementalGroups:
+    rule: RunAsAny
+  volumes:
+  - configMap
+  - secret
+  - emptyDir
+  - hostPath
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+rules:
+- apiGroups:
+  - extensions
+  resourceNames:
+  - psp.flannel.unprivileged
+  resources:
+  - podsecuritypolicies
+  verbs:
+  - use
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes/status
+  verbs:
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flannel
+subjects:
+- kind: ServiceAccount
+  name: flannel
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  cni-conf.json: |
+    {
+      "name": "cbr0",
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "flannel",
+          "delegate": {
+            "hairpinMode": true,
+            "isDefaultGateway": true
+          }
+        },
+        {
+          "type": "portmap",
+          "capabilities": {
+            "portMappings": true
+          }
+        }
+      ]
+    }
+  net-conf.json: |
+    {
+      "Network": "172.31.0.0/17",
+      "Backend": {
+        "Type": "vxlan"
+      }
+    }
+kind: ConfigMap
+metadata:
+  labels:
+    app: flannel
+    k8s-app: flannel
+    tier: node
+  name: kube-flannel-cfg
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: flannel
+    k8s-app: flannel
+    tier: node
+  name: kube-flannel-edge
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: flannel
+      k8s-app: flannel
+  template:
+    metadata:
+      labels:
+        app: flannel
+        k8s-app: flannel
+        tier: node
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+              - key: node-role.kubernetes.io/agent
+                operator: Exists
+              - key: node-role.kubernetes.io/edge
+                operator: Exists
+      containers:
+      - args:
+        - --ip-masq
+        - --kube-subnet-mgr
+        - --kube-api-url=http://127.0.0.1:10550
+        command:
+        - /opt/bin/flanneld
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: EVENT_QUEUE_DEPTH
+          value: "5000"
+        image: docker.io/flannel/flannel:v0.25.4
+        name: kube-flannel
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+          privileged: false
+        volumeMounts:
+        - mountPath: /run/flannel
+          name: run
+        - mountPath: /etc/kube-flannel/
+          name: flannel-cfg
+        - mountPath: /run/xtables.lock
+          name: xtables-lock
+      hostNetwork: true
+      initContainers:
+      - args: [ "-c", "cp -au /cni-plugins/* /cni-plugin" ]
+        command: [ "/bin/sh" ]
+        image: docker.io/muicoder/cni-plugins:v1.5.1
+        name: install-cni-plugins
+        volumeMounts:
+        - name: cni-plugin
+          mountPath: /cni-plugin
+      - args:
+        - -f
+        - /flannel
+        - /opt/cni/bin/flannel
+        command:
+        - cp
+        image: docker.io/flannel/flannel-cni-plugin:v1.5.1-flannel1
+        name: install-cni-plugin
+        volumeMounts:
+        - mountPath: /opt/cni/bin
+          name: cni-plugin
+      - args:
+        - -f
+        - /etc/kube-flannel/cni-conf.json
+        - /etc/cni/net.d/10-flannel.conflist
+        command:
+        - cp
+        image: docker.io/flannel/flannel:v0.25.4
+        name: install-cni
+        volumeMounts:
+        - mountPath: /etc/cni/net.d
+          name: cni
+        - mountPath: /etc/kube-flannel/
+          name: flannel-cfg
+      priorityClassName: system-node-critical
+      serviceAccountName: flannel
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      volumes:
+      - hostPath:
+          path: /run/flannel
+          type: DirectoryOrCreate
+        name: run
+      - hostPath:
+          path: /opt/cni/bin
+          type: DirectoryOrCreate
+        name: cni-plugin
+      - hostPath:
+          path: /etc/cni/net.d
+          type: DirectoryOrCreate
+        name: cni
+      - configMap:
+          name: kube-flannel-cfg
+        name: flannel-cfg
+      - hostPath:
+          path: /run/xtables.lock
+          type: FileOrCreate
+        name: xtables-lock

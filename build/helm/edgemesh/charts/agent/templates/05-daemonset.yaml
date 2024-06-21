@@ -64,6 +64,9 @@ spec:
             {{- end }}
       restartPolicy: Always
       serviceAccountName: {{ .Release.Name }}-agent
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
       volumes:
         - name: conf
           configMap:

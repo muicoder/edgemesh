@@ -16,4 +16,4 @@ name: spiderpool
 sources:
 - https://github.com/spidernet-io/spiderpool
 type: application
-version: 0.9.1
+version: 0.9.4
